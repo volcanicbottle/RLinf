@@ -692,6 +692,29 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
             return self.default_forward(**kwargs)
         raise NotImplementedError(f"ForwardType={forward_type} not supported yet.")
 
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, **kwargs):
+        """Forward HF-style grad-ckpt enable to the inner VLM tower.
+
+        RLinf's FSDPModelManager.setup_model_and_optimizer calls this on the
+        top-level model. SmolVLA's wrapper is a plain nn.Module so the call
+        misses; forward it to vlm_with_expert.vlm (which is a HF SmolVLM
+        model that ships gradient_checkpointing_enable). The action expert
+        is small enough that we don't checkpoint it.
+        """
+        vlm = self.inner.vlm_with_expert.vlm
+        if hasattr(vlm, "gradient_checkpointing_enable"):
+            if gradient_checkpointing_kwargs is None:
+                vlm.gradient_checkpointing_enable()
+            else:
+                vlm.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+                )
+
+    def gradient_checkpointing_disable(self):
+        vlm = self.inner.vlm_with_expert.vlm
+        if hasattr(vlm, "gradient_checkpointing_disable"):
+            vlm.gradient_checkpointing_disable()
+
     def freeze_vlm(self):
         """Freeze the VLM (vision encoder + LLM) leaving the action expert trainable.
 
