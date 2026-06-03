@@ -1,0 +1,36 @@
+model_type: "smolvla"
+
+# Model path - HuggingFace repo or local checkpoint directory
+model_path: "HuggingFaceVLA/smolvla_libero"
+
+precision: null
+
+# Action and chunk settings
+num_action_chunks: 50
+action_dim: 7
+
+# LoRA settings (W1 default: train action expert only, no LoRA)
+is_lora: False
+lora_rank: 32
+
+# Training settings
+use_proprio: True
+num_steps: 10
+add_value_head: True
+
+# SmolVLA-specific parameters (mirrors openpi: sub-block in pi0.yaml)
+smolvla:
+  num_images_in_input: 2
+  noise_level: 0.5
+  action_chunk: ${actor.model.num_action_chunks}
+  num_steps: ${actor.model.num_steps}
+  train_expert_only: True
+  action_env_dim: ${actor.model.action_dim}
+  noise_method: "flow_sde"   # one of: flow_sde | flow_cps | flow_noise
+  add_value_head: ${actor.model.add_value_head}
+  value_after_vlm: False     # SmolVLA only supports suffix-side value head
+  chunk_critic_input: True
+  detach_critic_input: False
+  safe_get_logprob: False
+  joint_logprob: False
+  ignore_last: False

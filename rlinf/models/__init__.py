@@ -96,6 +96,11 @@ def _register_builtin_models():
 
         return get_model(cfg, torch_dtype)
 
+    def _build_smolvla(cfg: DictConfig, torch_dtype):
+        from rlinf.models.embodiment.smolvla import get_model
+
+        return get_model(cfg, torch_dtype)
+
     def _build_starvla(cfg: DictConfig, torch_dtype):
         from rlinf.models.embodiment.starvla import get_model
 
@@ -173,6 +178,12 @@ def _register_builtin_models():
     register_model(
         SupportedModel.LINGBOTVLA.value,
         _build_lingbotvla,
+        category="embodied",
+        force=True,
+    )
+    register_model(
+        SupportedModel.SMOLVLA.value,
+        _build_smolvla,
         category="embodied",
         force=True,
     )
@@ -258,6 +269,16 @@ def get_model(cfg: DictConfig):
                 tag_vlm_subtree(model, False)
                 tag_vlm_subtree(module_to_lora, True)
                 model.paligemma_with_expert.paligemma = module_to_lora
+            elif SupportedModel(model_type) == SupportedModel.SMOLVLA:
+                # SmolVLA's VLM subtree lives at model.inner.vlm_with_expert.vlm
+                # (the SmolVLM-500M tower). Same wrap pattern as openpi: LoRA-fy
+                # only the VLM, leave the action expert + value/noise heads
+                # full-precision trainable.
+                module_to_lora = model.inner.vlm_with_expert.vlm
+                module_to_lora = get_peft_model(module_to_lora, lora_config)
+                tag_vlm_subtree(model, False)
+                tag_vlm_subtree(module_to_lora, True)
+                model.inner.vlm_with_expert.vlm = module_to_lora
             else:
                 model = get_peft_model(model, lora_config)
         else:
