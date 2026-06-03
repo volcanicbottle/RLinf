@@ -26,7 +26,7 @@ runner:
     log_path: "../results/libero_spatial_ppo_smolvla"
     project_name: rlinf
     experiment_name: "smolvla_libero_spatial"
-    logger_backends: ["tensorboard"]
+    logger_backends: ["tensorboard", "wandb"]
 
   max_epochs: 1
   max_steps: -1
