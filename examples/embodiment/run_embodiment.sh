@@ -6,6 +6,10 @@ export SRC_FILE="${EMBODIED_PATH}/train_embodied_agent.py"
 
 export MUJOCO_GL=${MUJOCO_GL:-"egl"}
 export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-"egl"}
+# Some host images (e.g. AutoDL) preset OMP_NUM_THREADS to an empty/invalid
+# value; libgomp then prints a warning on every process spawn. Default to a
+# sane value so the warning doesn't fire — user can still override.
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 export ROBOTWIN_PATH=${ROBOTWIN_PATH:-"/path/to/RoboTwin"}
 export PYTHONPATH=${REPO_PATH}:${ROBOTWIN_PATH}:$PYTHONPATH
 
