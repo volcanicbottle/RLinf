@@ -38,8 +38,14 @@ def get_model(cfg: DictConfig, torch_dtype=None):
     ckpt_path = str(cfg.model_path)
     lerobot_policy = SmolVLAPolicy.from_pretrained(ckpt_path)
     if torch_dtype is not None:
-        # SmolVLA's VLM is loaded in bf16 by lerobot already; only cast the wrapper.
-        lerobot_policy = lerobot_policy.to(dtype=torch_dtype) if torch_dtype == torch.float32 else lerobot_policy
+        # Cast the whole policy (VLM + action expert + action_in_proj +
+        # action_out_proj) so FSDP sees uniform dtype across all params it
+        # wraps. lerobot ships the VLM in bf16 by default but action_in_proj
+        # / action_out_proj are fp32 — without this cast FSDP wrap_model
+        # crashes with "Must flatten tensors with uniform dtype". Choose
+        # precision in YAML (precision: "bf16" for memory, "float32" for
+        # accuracy).
+        lerobot_policy = lerobot_policy.to(dtype=torch_dtype)
 
     # Sub-block carries SmolVLA-specific PIRL knobs (mirrors cfg.openpi). Use
     # getattr with default {} so missing sub-blocks don't crash.

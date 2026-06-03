@@ -127,6 +127,11 @@ actor:
 
   model:
     model_path: "HuggingFaceVLA/smolvla_libero"
+    precision: "bf16"             # MIN-CONFIG: bf16 to give FSDP a uniform
+                                  # dtype (default null lets the VLM stay
+                                  # bf16 while action_in_proj/value_head
+                                  # remain fp32 — FSDP wrap crashes on the
+                                  # dtype mismatch).
     num_action_chunks: 5
     add_value_head: True
     num_steps: 4                  # MIN-CONFIG: 4 (was 10) — denoise steps
