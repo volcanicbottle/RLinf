@@ -23,7 +23,18 @@ from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
-from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
+from transformers import AutoConfig, AutoModelForCausalLM
+
+try:
+    from transformers import AutoModelForVision2Seq
+except ImportError:
+    # Removed in transformers >= 5.0; lerobot's SmolVLA stack requires
+    # transformers >= 5.4 which deletes this class. Models that need
+    # vision-encoder-decoder dispatch (e.g. OpenVLA-OFT official path)
+    # will see AutoModelForVision2Seq=None and fall through to the
+    # AutoModelForCausalLM branch in load(). SmolVLA does not use this
+    # dispatch — it loads via lerobot's SmolVLAPolicy.from_pretrained.
+    AutoModelForVision2Seq = None
 
 from rlinf.config import SupportedModel, torch_dtype_from_precision
 from rlinf.data.tokenizers import hf_tokenizer
@@ -159,7 +170,10 @@ class FSDPModelManager:
                 load_in_8bit=True,
             )
         else:
-            if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
+            if (
+                AutoModelForVision2Seq is not None
+                and type(model_config) in AutoModelForVision2Seq._model_mapping.keys()
+            ):
                 auto_model_class = AutoModelForVision2Seq
             else:
                 auto_model_class = AutoModelForCausalLM
