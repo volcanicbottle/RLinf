@@ -84,6 +84,13 @@ def get_model(cfg: DictConfig, torch_dtype=None):
     # policy_postprocessor (lerobot >= Q3-2025 format).
     model = SmolVLAForRLActionPrediction(lerobot_policy, rl_cfg=rl_cfg, ckpt_path=ckpt_path)
 
+    # Second cast pass: value_head / noise_head are created inside the wrapper
+    # __init__ as fresh fp32 Linear layers AFTER the lerobot policy cast above.
+    # Without this second pass, FSDP wrap sees the wrapper's heads in fp32 and
+    # the casted lerobot inner in bf16 → mixed-dtype FlatParam crash.
+    if torch_dtype is not None:
+        model = model.to(dtype=torch_dtype)
+
     # Mirrors openpi:66-67 — when train_expert_only, freeze VLM so only the
     # action expert + value/noise heads receive gradients.
     if rl_cfg["train_expert_only"]:
