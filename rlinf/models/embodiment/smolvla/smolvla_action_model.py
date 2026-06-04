@@ -199,14 +199,6 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
             # configured to do so; otherwise raw — SmolVLA does its own [-1,1]
             # rescale inside prepare_images), observation.state (normalized),
             # observation.language.* (tokenized), task (string), action (absent here).
-            # Cast all floating-point inputs to match model dtype. With
-            # precision=bf16 the model weights are bf16 but env returns state
-            # in fp32 — without this cast state_proj's F.linear crashes with
-            # "mat1 and mat2 must have the same dtype".
-            model_dtype = next(self.parameters()).dtype
-            for k, v in batch.items():
-                if torch.is_tensor(v) and v.is_floating_point() and v.dtype != model_dtype:
-                    batch[k] = v.to(model_dtype)
             return batch
 
         # ---- fallback: manual tokenization, no normalization. Same as before.
@@ -388,16 +380,6 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         if isinstance(idx, int):
             idx = torch.tensor(idx, device=device).expand(bsize)
         noise_level = torch.tensor(self.noise_level, device=device)
-
-        # Force x_t to match action_in_proj's weight dtype before it goes
-        # into lerobot's denoise_step → embed_suffix → action_in_proj. The
-        # outer sample_actions sets x_dtype from action_in_proj at creation
-        # time, but the rollout worker's path occasionally produces fp32 x_t
-        # even when the policy is cast to bf16; this final cast is the
-        # belt-and-suspenders fix for the F.linear mat1/mat2 dtype check.
-        w_dtype = self.inner.action_in_proj.weight.dtype
-        if x_t.dtype != w_dtype:
-            x_t = x_t.to(dtype=w_dtype)
 
         # Grid: [1, (N-1)/N, ..., 1/N, 0] — length N+1.
         timesteps = torch.linspace(1.0, 1.0 / denoise_steps, denoise_steps, device=device)

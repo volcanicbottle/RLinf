@@ -130,11 +130,15 @@ actor:
 
   model:
     model_path: "HuggingFaceVLA/smolvla_libero"
-    precision: "bf16"             # MIN-CONFIG: bf16 to give FSDP a uniform
-                                  # dtype (default null lets the VLM stay
-                                  # bf16 while action_in_proj/value_head
-                                  # remain fp32 — FSDP wrap crashes on the
-                                  # dtype mismatch).
+    precision: "float32"          # MIN-CONFIG: pure fp32 to dodge the chain
+                                  # of dtype band-aids needed under bf16
+                                  # (lerobot's modeling_smolvla.py hard-codes
+                                  # fp32 at sample_noise/sample_time/timesteps
+                                  # etc.; under bf16 these caused repeated
+                                  # F.linear dtype mismatches). fp32 throughout
+                                  # is slower but A800-80G has plenty of room
+                                  # and bf16 mixed-precision via FSDP is a
+                                  # separate optimization for later.
     num_action_chunks: 50         # MIN-CONFIG: 50 — must match SmolVLA's
                                   # baked chunk_size (lerobot config) so
                                   # bootstrap_step's zeros(B, num_action_chunks)
