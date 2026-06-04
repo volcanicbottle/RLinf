@@ -179,6 +179,14 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         renamed = self.rename_env_obs(env_obs)
 
         if self.preprocessor is not None:
+            # lerobot's preprocessor runs F.interpolate / Resize on images which
+            # don't support uint8 inputs (RuntimeError: "upsample_bilinear2d_out_frame"
+            # not implemented for 'Byte'). LIBERO env returns uint8 RGB; cast
+            # before handing off so the bilinear upsample sees float.
+            for k in list(renamed.keys()):
+                v = renamed[k]
+                if torch.is_tensor(v) and v.dtype == torch.uint8:
+                    renamed[k] = v.float() / 255.0
             batch = self.preprocessor(renamed)
             # The preprocessor moves to device + normalizes + tokenizes. Output
             # keys: observation.images.<k> (in [-1,1] range only if Normalize is
