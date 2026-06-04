@@ -34,7 +34,9 @@ runner:
   # Hard safety cap: stop after a handful of PPO steps regardless of
   # epoch progress. Prevents a runaway from burning cloud time once
   # the link is confirmed.
-  max_epochs: 1
+  max_epochs: 5     # MIN-CONFIG: 5 epochs * 1 chunk_step/epoch = 5 PPO steps total
+                    # (n_chunk_steps = max_steps_per_rollout_epoch // num_action_chunks
+                    # = 50 // 50 = 1, so we need max_epochs to drive multiple PPO steps).
   max_steps: 5
 
   only_eval: False
