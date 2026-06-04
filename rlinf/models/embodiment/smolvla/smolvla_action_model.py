@@ -667,11 +667,19 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
 
         # forward_inputs is what the actor worker passes back into self.forward()
         # during training to recompute logprobs for the proximal PPO ratio.
+        # RLinf's MultiStepRolloutWorker._split_rollout_result calls
+        # torch.split on every top-level value of forward_inputs, so all
+        # entries must be tensors that share a B dimension at dim 0. Flatten
+        # the prepared batch (skip strings like `task`) to top-level keys;
+        # default_forward will reconstruct the batch by taking everything
+        # except chains/denoise_inds.
         forward_inputs = {
             "chains": out["chains"],
             "denoise_inds": out["denoise_inds"],
-            "batch": batch,            # full prepared obs; default_forward unpacks it
         }
+        for k, v in batch.items():
+            if torch.is_tensor(v):
+                forward_inputs[k] = v
         result = {
             "chains": out["chains"],
             "prev_logprobs": out["prev_logprobs"],
@@ -686,17 +694,22 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
     def default_forward(self, data: dict, **kwargs) -> dict[str, Tensor]:
         """Training forward: recompute (logprobs, values, entropy) for stored chains.
 
-        `data` is the `forward_inputs` blob produced by predict_action_batch:
+        `data` is the `forward_inputs` blob produced by predict_action_batch.
+        Layout (top-level dict, all tensors, B at dim 0 so RLinf can split):
             data["chains"]        — [B, N+1, chunk, max_a]
             data["denoise_inds"]  — [B, N]
-            data["batch"]         — prepared obs dict (images, lang_tokens, state)
+            data[<batch keys>]    — the prepared obs (images, state, language
+                                    tokens, ...) inlined at top level so
+                                    RLinf's split-by-B works.
         Returns {"logprobs", "values", "entropy"} per actor-worker contract
         (rlinf/workers/actor/async_ppo_fsdp_worker.py).
         """
         compute_values = bool(kwargs.get("compute_values", False))
         chains = data["chains"]
         denoise_inds = data["denoise_inds"]
-        batch = data["batch"]
+        # Reconstruct the prepared-obs batch by taking every key that wasn't
+        # one of the rollout-bookkeeping tensors.
+        batch = {k: v for k, v in data.items() if k not in ("chains", "denoise_inds")}
 
         log_probs, values, entropy = self.get_log_prob_value(
             batch, chains, denoise_inds, compute_values=compute_values,
