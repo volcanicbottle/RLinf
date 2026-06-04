@@ -90,8 +90,11 @@ env:
 
   train:
     total_num_envs: 2             # MIN-CONFIG: 2 (was 4)
-    max_episode_steps: 5
-    max_steps_per_rollout_epoch: 5
+    max_episode_steps: 50         # MIN-CONFIG: 50 — must >= num_action_chunks so
+                                  # one chunk_step fits inside an episode
+    max_steps_per_rollout_epoch: 50  # MIN-CONFIG: 50 — n_chunk_steps =
+                                     # max_steps_per_rollout_epoch //
+                                     # num_action_chunks, must be >= 1
   eval:
     total_num_envs: 1
     max_episode_steps: 10
@@ -132,7 +135,11 @@ actor:
                                   # bf16 while action_in_proj/value_head
                                   # remain fp32 — FSDP wrap crashes on the
                                   # dtype mismatch).
-    num_action_chunks: 5
+    num_action_chunks: 50         # MIN-CONFIG: 50 — must match SmolVLA's
+                                  # baked chunk_size (lerobot config) so
+                                  # bootstrap_step's zeros(B, num_action_chunks)
+                                  # and env_interact_step's per-action
+                                  # terminations stack without shape mismatch.
     add_value_head: True
     num_steps: 4                  # MIN-CONFIG: 4 (was 10) — denoise steps
     smolvla:
