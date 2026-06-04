@@ -6,6 +6,12 @@ defaults:
   - weight_syncer/patch_syncer@weight_syncer
   - override hydra/job_logging: stdout
 
+# Real-training config for SmolVLA x π_RL on LIBERO-Spatial.
+# Defaults are sized for a 100-step "mini" training run on A800-80G
+# (~50-90 min, ~¥7). To continue past the mini phase, override:
+#   runner.resume_dir=<path-to-checkpoints/global_step_100>
+#   runner.max_steps=-1
+# at the command line.
 hydra:
   run:
     dir: .
@@ -16,8 +22,6 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    # Single-GPU collocated (RTX 5060 8GB).
-    # Multi-GPU users: change to e.g. `actor,env,rollout: 0-1` for 2-GPU collocation.
     actor,env,rollout: 0
 
 runner:
@@ -28,20 +32,22 @@ runner:
     experiment_name: "smolvla_libero_spatial"
     logger_backends: ["tensorboard", "wandb"]
 
-  max_epochs: 1
-  max_steps: -1
+  max_epochs: -1                 # uncapped; runner stops at max_steps
+  max_steps: 100                 # MINI phase. Override to -1 for full training.
 
   only_eval: False
-  val_check_interval: -1
-  save_interval: -1
+  val_check_interval: 50         # eval every 50 PPO steps
+  save_interval: 25              # checkpoint every 25 PPO steps → 4 saves in
+                                 # the mini phase. Cheap insurance vs crashes.
 
 algorithm:
-  # Kept identical to the openpi baseline — these are LIBERO-tuned PPO knobs.
+  # PPO knobs kept identical to openpi baseline — LIBERO-tuned.
   normalize_advantages: True
   kl_penalty: kl
-  group_size: 1
+  group_size: 8                  # MINI: 8 (was 2 in min). Aligns with envs and
+                                 # gives advantage estimate enough samples.
   reward_coef: 1.0
-  rollout_epoch: 2
+  rollout_epoch: 2               # MINI: 2 passes per rollout buffer.
   eval_rollout_epoch: 1
 
   reward_type: chunk_level
@@ -83,32 +89,35 @@ algorithm:
 env:
   group_name: "EnvGroup"
 
-  # 8GB GPU budget — keep env count low.
   train:
-    total_num_envs: 4
-    max_episode_steps: 5
-    max_steps_per_rollout_epoch: 5
+    total_num_envs: 8            # MINI: 8 (min was 2). 4x more parallel data.
+    max_episode_steps: 300       # LIBERO's real horizon. min config used 50
+                                 # which is too short for any meaningful
+                                 # success_once signal.
+    max_steps_per_rollout_epoch: 50  # = num_action_chunks. n_chunk_steps = 1
+                                     # chunk per epoch is fine; we get more
+                                     # PPO steps via max_epochs/max_steps.
   eval:
-    total_num_envs: 1
-    max_episode_steps: 10
+    total_num_envs: 4            # MINI eval: 4 envs.
+    max_episode_steps: 300       # full LIBERO horizon for eval too.
     auto_reset: True
     ignore_terminations: True
-    max_steps_per_rollout_epoch: 10
+    max_steps_per_rollout_epoch: 300
     group_size: 1
     use_fixed_reset_state_ids: True
     is_eval: True
     video_cfg:
-      save_video: False
+      save_video: False           # set True if you want eval videos saved
       video_base_dir: ${runner.logger.log_path}/video/eval
 
 rollout:
   group_name: "RolloutGroup"
   generation_backend: "huggingface"
   recompute_logprobs: False
-  # unnorm_key: libero_spatial   # openpi 残留字段 — SmolVLA 不读：反归一化由 lerobot
-                                  # PolicyProcessorPipeline 在 predict_action_batch 内完成，
-                                  # 统计量 baked 在 ckpt 里，不通过字符串 key 查表。
-  enable_offload: True         # 8GB GPU — offload rollout weights to CPU
+  # unnorm_key: libero_spatial   # openpi 残留字段 — SmolVLA 不读
+  enable_offload: True           # cheap insurance — rollout weights offloaded
+                                 # to CPU between calls. A800-80G doesn't need
+                                 # it but leaving on doesn't hurt.
   pipeline_stage_num: 1
 
   model:
@@ -118,22 +127,29 @@ rollout:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
-  micro_batch_size: 1          # 8GB GPU — minimum micro batch
-  global_batch_size: 4         # = micro_batch * num_envs
+  micro_batch_size: 1
+  global_batch_size: 8            # = micro_batch_size * total_num_envs.
   seed: 42
-  enable_offload: True         # 8GB GPU — offload actor weights to CPU
+  enable_offload: True
 
-  # Override the default values in model/smolvla
   model:
     model_path: "HuggingFaceVLA/smolvla_libero"
-    num_action_chunks: 5       # interface for the env (LIBERO uses ~5 action chunks)
+    precision: "bf16"             # Proven working in W1 cloud milestone.
+                                  # All adapter-side dtype band-aids in place
+                                  # (chains accumulate as fp32 internally,
+                                  # everything else bf16). fp32-pure path is
+                                  # tracked separately as tech debt.
+    num_action_chunks: 50         # Must match SmolVLA's baked chunk_size=50.
     add_value_head: True
-    # SmolVLA-specific overrides
+    num_steps: 4                  # denoise steps (min config was 4 for speed;
+                                  # full SmolVLA default is 10. Keep 4 for
+                                  # mini, bump later if loss plateaus.)
     smolvla:
       detach_critic_input: True
+      num_steps: 4
 
   optim:
-    lr: 5.0e-6
+    lr: 5.0e-6                    # conservative VLA RL lr
     value_lr: 1.0e-4
     adam_beta1: 0.9
     adam_beta2: 0.95
@@ -142,10 +158,11 @@ actor:
     clip_grad: 1.0
     critic_warmup_steps: 5
 
-  # 8GB GPU — full FSDP shard + gradient checkpointing
   fsdp_config:
     strategy: "fsdp"
     sharding_strategy: "full_shard"
+    use_orig_params: True       # train_expert_only freezes VLM → mixed
+                                # requires_grad → need this flag
     gradient_checkpointing: True
     mixed_precision:
       param_dtype: ${actor.model.precision}
