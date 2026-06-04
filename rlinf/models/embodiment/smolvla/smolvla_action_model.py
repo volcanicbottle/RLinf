@@ -181,12 +181,18 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         if self.preprocessor is not None:
             # lerobot's preprocessor runs F.interpolate / Resize on images which
             # don't support uint8 inputs (RuntimeError: "upsample_bilinear2d_out_frame"
-            # not implemented for 'Byte'). LIBERO env returns uint8 RGB; cast
-            # before handing off so the bilinear upsample sees float.
+            # not implemented for 'Byte'). LIBERO env returns uint8 RGB in HWC
+            # numpy convention [B, H, W, 3]; lerobot/SmolVLM expects CHW [B, 3,
+            # H, W]. Cast uint8→float AND permute HWC→CHW before handing off,
+            # otherwise the preprocessor's Resize misinterprets dims and Conv2d
+            # crashes with "expected input to have 3 channels, but got 256".
             for k in list(renamed.keys()):
                 v = renamed[k]
                 if torch.is_tensor(v) and v.dtype == torch.uint8:
-                    renamed[k] = v.float() / 255.0
+                    v = v.float() / 255.0
+                if torch.is_tensor(v) and v.dim() == 4 and v.shape[-1] == 3 and v.shape[1] != 3:
+                    v = v.permute(0, 3, 1, 2).contiguous()
+                renamed[k] = v
             batch = self.preprocessor(renamed)
             # The preprocessor moves to device + normalizes + tokenizes. Output
             # keys: observation.images.<k> (in [-1,1] range only if Normalize is
