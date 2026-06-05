@@ -173,14 +173,17 @@ def _run():
         f"mean={diff_B.mean().item():.6f}  std={diff_B.std().item():.6f}"
     )
 
-    # ----- Sanity check C: perturb chains_next → rescore SHOULD diverge -----
-    # If [A]/[B] are exactly 0 we want to rule out a no-op comparison. Add
-    # small noise to the stored chains and verify the rescore path picks it
-    # up — if diff_C also reports ~0, the test isn't actually testing
-    # anything (e.g. cached logp, broken fwd, or shared tensor reference).
+    # ----- Sanity check C: perturb chains AT the scored step → rescore SHOULD diverge -----
+    # With joint_logprob=False the rescore only reads chains at
+    # chains[:, denoise_inds[:, 0]] (pre-step) and chains[:, denoise_inds[:, 0] + 1]
+    # (post-step = the sample being scored). Perturbations at OTHER chain
+    # indices are invisible. Use the actual ds from sample_actions to pick
+    # the right index.
     policy.eval()
+    ds = int(denoise_inds[0, 0].item())
+    print(f"[C] perturbing chains[:, {ds + 1}] (= the sample being scored at denoise step {ds})")
     chains_perturbed = chains.clone()
-    chains_perturbed[:, -1] = chains_perturbed[:, -1] + 0.05  # final chain state shift
+    chains_perturbed[:, ds + 1] = chains_perturbed[:, ds + 1] + 0.05
     fwd_perturbed = dict(forward_inputs)
     fwd_perturbed["chains"] = chains_perturbed
     with torch.no_grad():
