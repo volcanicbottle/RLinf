@@ -173,8 +173,74 @@ def _run():
         f"mean={diff_B.mean().item():.6f}  std={diff_B.std().item():.6f}"
     )
 
+    # ----- Sanity check C: perturb chains_next → rescore SHOULD diverge -----
+    # If [A]/[B] are exactly 0 we want to rule out a no-op comparison. Add
+    # small noise to the stored chains and verify the rescore path picks it
+    # up — if diff_C also reports ~0, the test isn't actually testing
+    # anything (e.g. cached logp, broken fwd, or shared tensor reference).
+    policy.eval()
+    chains_perturbed = chains.clone()
+    chains_perturbed[:, -1] = chains_perturbed[:, -1] + 0.05  # final chain state shift
+    fwd_perturbed = dict(forward_inputs)
+    fwd_perturbed["chains"] = chains_perturbed
+    with torch.no_grad():
+        out_C = policy(
+            forward_inputs=fwd_perturbed,
+            compute_logprobs=True,
+            compute_entropy=False,
+            compute_values=False,
+            use_cache=False,
+        )
+    rescore_C = out_C["logprobs"]
+    diff_C = (prev_logp.float() - rescore_C.float()).abs()
+    print(
+        f"[C] perturbed diff:    max={diff_C.max().item():.6f}  "
+        f"mean={diff_C.mean().item():.6f}  std={diff_C.std().item():.6f}"
+    )
+
+    # ----- Sanity check D: different batch → completely different logp -----
+    # Swap language tokens for a totally different sentence. If diff_D is
+    # ~0 the rescore isn't even reading the batch (would mean global caching
+    # or the prefix cache is detached from the actual obs).
+    other_batch = {**batch}
+    other_batch["observation.language.tokens"] = torch.tensor(
+        [[50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66]],
+        dtype=torch.long,
+        device=DEVICE,
+    )
+    fwd_other = {"chains": chains, "denoise_inds": denoise_inds}
+    for k, v in other_batch.items():
+        if torch.is_tensor(v):
+            fwd_other[k] = v
+    with torch.no_grad():
+        out_D = policy(
+            forward_inputs=fwd_other,
+            compute_logprobs=True,
+            compute_entropy=False,
+            compute_values=False,
+            use_cache=False,
+        )
+    rescore_D = out_D["logprobs"]
+    diff_D = (prev_logp.float() - rescore_D.float()).abs()
+    print(
+        f"[D] other-task diff:   max={diff_D.max().item():.6f}  "
+        f"mean={diff_D.mean().item():.6f}  std={diff_D.std().item():.6f}"
+    )
+
     # ----- Conclusion -----
     THRESH = 0.01
+    SANITY_MIN = 1e-4  # Test C/D MUST show real divergence
+    sanity_ok = diff_C.max().item() > SANITY_MIN and diff_D.max().item() > SANITY_MIN
+    if not sanity_ok:
+        print("\n=== SANITY CHECK FAILED ===")
+        print(f"  diff_C max = {diff_C.max().item():.6f} (expected > {SANITY_MIN})")
+        print(f"  diff_D max = {diff_D.max().item():.6f} (expected > {SANITY_MIN})")
+        print("  → Either rescore is a no-op (cached logp, wrong fwd entry point)")
+        print("     OR shared tensor reference makes A/B/C/D return the same buffer.")
+        print("  → Cannot trust A/B results until this is debugged.")
+        return 1
+    print(f"\n[sanity] C and D both show real divergence (max diff > {SANITY_MIN}) — test IS doing work.")
+
     print("\n=== Conclusion ===")
     if diff_A.mean().item() < THRESH and diff_B.mean().item() < THRESH:
         print("PASS: sample-time and rescore-time logp agree at the element level in bf16.")
