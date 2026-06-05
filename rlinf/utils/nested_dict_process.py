@@ -116,6 +116,30 @@ def concat_batch(data1, data2):
     return batch
 
 
+def _pad_tensors_to_max_shape(tensors: list) -> list:
+    # Pad tensors on the right of each dim to a common max shape so torch.stack
+    # works across rollout epochs whose per-step features (e.g. language tokens)
+    # have variable length. Pads with 0 (False for bool, 0 / 0.0 for int / float
+    # — all match the conventional pad-token / pad-mask semantics).
+    if len(tensors) <= 1:
+        return tensors
+    shapes = [tuple(t.shape) for t in tensors]
+    if all(s == shapes[0] for s in shapes):
+        return tensors
+    rank = len(shapes[0])
+    max_shape = [max(s[d] for s in shapes) for d in range(rank)]
+    padded = []
+    for t in tensors:
+        if list(t.shape) == max_shape:
+            padded.append(t)
+            continue
+        pad_spec = []
+        for d in range(rank - 1, -1, -1):
+            pad_spec.extend([0, max_shape[d] - t.shape[d]])
+        padded.append(torch.nn.functional.pad(t, pad_spec, mode="constant", value=0))
+    return padded
+
+
 def stack_list_of_dict_tensor(list_of_dict: list, dim=0):
     if len(list_of_dict) == 0:
         return {}
@@ -126,6 +150,7 @@ def stack_list_of_dict_tensor(list_of_dict: list, dim=0):
         _v0 = list_of_dict[0][key]
         if isinstance(_v0, torch.Tensor):
             v_list = [d[key] for d in list_of_dict]
+            v_list = _pad_tensors_to_max_shape(v_list)
             ret[key] = torch.stack(v_list, dim=dim)
         elif isinstance(_v0, dict):
             v_list = [d[key] for d in list_of_dict]
