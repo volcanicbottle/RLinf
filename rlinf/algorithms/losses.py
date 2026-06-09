@@ -201,13 +201,18 @@ def compute_ppo_actor_loss(
     if fast_path_zero_loss_mask and (
         loss_mask is not None and loss_mask[0].sum() == 0.0
     ):
-        return torch.tensor(0.0, device=logprobs.device), {
+        # Preserve autograd graph through logprobs so backward() doesn't
+        # crash with "element 0 of tensors does not require grad" — the
+        # value is still numerically zero, but the grad_fn chain stays
+        # intact so the optimizer step is a no-op rather than a failure.
+        zero_loss = logprobs.sum() * 0.0
+        return zero_loss, {
             "actor/token_num": torch.tensor(0.0, device=logprobs.device),
             "actor/policy_loss": torch.tensor(0.0, device=logprobs.device),
             "actor/policy_loss_mbs_mean": torch.tensor(0.0, device=logprobs.device),
             "actor/policy_loss_abs": torch.tensor(0.0, device=logprobs.device),
-            "actor/ratio": torch.tensor(0.0, device=logprobs.device),
-            "actor/clipped_ratio": torch.tensor(0.0, device=logprobs.device),
+            "actor/ratio": torch.tensor(1.0, device=logprobs.device),
+            "actor/clipped_ratio": torch.tensor(1.0, device=logprobs.device),
             "actor/dual_cliped_ratio": torch.tensor(0.0, device=logprobs.device),
             "actor/approx_kl": torch.tensor(0.0, device=logprobs.device),
             "actor/clip_fraction": torch.tensor(0.0, device=logprobs.device),

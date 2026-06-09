@@ -1461,6 +1461,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         "task_type": self.cfg.runner.task_type,
                         "critic_warmup": self.optimizer_steps
                         < self.critic_warmup_steps,
+                        "fast_path_zero_loss_mask": True,
                     }
                     loss, metrics_data = policy_loss(**kwargs)
 
