@@ -113,7 +113,12 @@ env:
 rollout:
   group_name: "RolloutGroup"
   generation_backend: "huggingface"
-  recompute_logprobs: False
+  recompute_logprobs: False      # Async-only knob (the sync EmbodiedRunner
+                                 # ignores it). KEEP False: the async proximal
+                                 # path cannot handle step-axis prev_logprobs —
+                                 # see PREV_LOGPROB_PASSTHROUGH_MODELS in
+                                 # rlinf/config.py. Ratio-leg consistency is
+                                 # handled in default_forward instead.
   # unnorm_key: libero_spatial   # openpi 残留字段 — SmolVLA 不读
   enable_offload: True           # cheap insurance — rollout weights offloaded
                                  # to CPU between calls. A800-80G doesn't need
@@ -134,11 +139,12 @@ actor:
 
   model:
     model_path: "HuggingFaceVLA/smolvla_libero"
-    precision: "bf16"             # Proven working in W1 cloud milestone.
-                                  # All adapter-side dtype band-aids in place
-                                  # (chains accumulate as fp32 internally,
-                                  # everything else bf16). fp32-pure path is
-                                  # tracked separately as tech debt.
+    precision: "fp32"             # Pure fp32 — lerobot hard-codes fp32 in the
+                                  # denoise chain, so fp32 everywhere needs no
+                                  # dtype band-aids (~1.5-2x slower than bf16;
+                                  # mixed precision is a later optimization).
+                                  # MUST be the literal "fp32", not "float32" —
+                                  # see torch_dtype_from_precision in rlinf/config.py.
     num_action_chunks: 50         # Must match SmolVLA's baked chunk_size=50.
     add_value_head: True
     num_steps: 4                  # denoise steps (min config was 4 for speed;

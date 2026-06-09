@@ -31,7 +31,11 @@ from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
 from rlinf.algorithms.utils import (
     kl_penalty,
 )
-from rlinf.config import SupportedModel, torch_dtype_from_precision
+from rlinf.config import (
+    PREV_LOGPROB_PASSTHROUGH_MODELS,
+    SupportedModel,
+    torch_dtype_from_precision,
+)
 from rlinf.data.embodied_io_struct import Trajectory, convert_trajectories_to_batch
 from rlinf.data.io_struct import BatchResizingIterator, RolloutResult
 from rlinf.hybrid_engines.fsdp.fsdp_model_manager import (
@@ -976,6 +980,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         Worker.__init__(self)
         super().__init__(cfg.actor, self._world_size, self._rank)
         self.cfg = cfg
+        self._model_type = SupportedModel(cfg.actor.model.model_type)
         self._env_group_name = cfg.env.group_name
         self._rollout_group_name = cfg.rollout.group_name
         self._component_placement = HybridComponentPlacement(cfg, Cluster())
@@ -1406,7 +1411,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     forward_inputs = batch.get("forward_inputs", None)
 
                     kwargs = {}
-                    if SupportedModel(self.cfg.actor.model.model_type) in [
+                    if self._model_type in [
                         SupportedModel.OPENVLA,
                         SupportedModel.OPENVLA_OFT,
                     ]:
@@ -1414,10 +1419,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                             self.cfg.algorithm.sampling_params.temperature_train
                         )
                         kwargs["top_k"] = self.cfg.algorithm.sampling_params.top_k
-                    elif (
-                        SupportedModel(self.cfg.actor.model.model_type)
-                        == SupportedModel.GR00T
-                    ):
+                    elif self._model_type in PREV_LOGPROB_PASSTHROUGH_MODELS:
                         kwargs["prev_logprobs"] = prev_logprobs
 
                     compute_values = (
@@ -1434,10 +1436,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                             **kwargs,
                         )
 
-                    if (
-                        SupportedModel(self.cfg.actor.model.model_type)
-                        == SupportedModel.GR00T
-                    ):
+                    if self._model_type in PREV_LOGPROB_PASSTHROUGH_MODELS:
                         prev_logprobs = output_dict["prev_logprobs"]
 
                     kwargs = {

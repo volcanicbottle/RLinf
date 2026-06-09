@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
-from rlinf.config import SupportedModel
+from rlinf.config import PREV_LOGPROB_PASSTHROUGH_MODELS, SupportedModel
 from rlinf.utils.distributed import all_reduce_dict, masked_normalization
 from rlinf.utils.metric_utils import append_to_dict, compute_rollout_metrics
 from rlinf.utils.nested_dict_process import put_tensor_device, split_dict_to_chunk
@@ -119,7 +119,7 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                 )
 
             model_kwargs = {}
-            if SupportedModel(self.cfg.actor.model.model_type) in [
+            if self._model_type in [
                 SupportedModel.OPENVLA,
                 SupportedModel.OPENVLA_OFT,
             ]:
@@ -127,9 +127,7 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                     self.cfg.algorithm.sampling_params.temperature_train
                 )
                 model_kwargs["top_k"] = self.cfg.algorithm.sampling_params.top_k
-            elif (
-                SupportedModel(self.cfg.actor.model.model_type) == SupportedModel.GR00T
-            ):
+            elif self._model_type in PREV_LOGPROB_PASSTHROUGH_MODELS:
                 model_kwargs["prev_logprobs"] = micro_batch["prev_logprobs"]
 
             out = self.model(
@@ -252,7 +250,7 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                         )
 
                     model_kwargs = {}
-                    if SupportedModel(self.cfg.actor.model.model_type) in [
+                    if self._model_type in [
                         SupportedModel.OPENVLA,
                         SupportedModel.OPENVLA_OFT,
                     ]:
@@ -260,10 +258,7 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                             self.cfg.algorithm.sampling_params.temperature_train
                         )
                         model_kwargs["top_k"] = self.cfg.algorithm.sampling_params.top_k
-                    elif (
-                        SupportedModel(self.cfg.actor.model.model_type)
-                        == SupportedModel.GR00T
-                    ):
+                    elif self._model_type in PREV_LOGPROB_PASSTHROUGH_MODELS:
                         model_kwargs["prev_logprobs"] = old_logprobs
 
                     compute_values = self.cfg.algorithm.adv_type == "gae"
@@ -278,10 +273,7 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                             **model_kwargs,
                         )
 
-                    if (
-                        SupportedModel(self.cfg.actor.model.model_type)
-                        == SupportedModel.GR00T
-                    ):
+                    if self._model_type in PREV_LOGPROB_PASSTHROUGH_MODELS:
                         old_logprobs = out["prev_logprobs"]
 
                     loss_kwargs = {

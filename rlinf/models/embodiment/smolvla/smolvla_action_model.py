@@ -47,6 +47,18 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
     (predict_action_batch, default_forward, sample_actions_with_chains).
     """
 
+    # forward_inputs keys that are rollout bookkeeping, not prepared-obs batch
+    # entries. default_forward reconstructs the batch by excluding these;
+    # external consumers (smoke gates) must use the same constant, never a
+    # private copy of the tuple.
+    ROLLOUT_BOOKKEEPING_KEYS = ("chains", "denoise_inds")
+
+    # Set by get_model after it casts the policy to the configured precision.
+    # None (direct from_pretrained build, e.g. smoke) disables the input-dtype
+    # tripwire in prepare_observations — that regime is legitimately
+    # mixed-dtype and lerobot handles its own internal casts.
+    expected_input_dtype: torch.dtype | None = None
+
     def __init__(
         self,
         lerobot_policy,
@@ -199,14 +211,23 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
             # configured to do so; otherwise raw — SmolVLA does its own [-1,1]
             # rescale inside prepare_images), observation.state (normalized),
             # observation.language.* (tokenized), task (string), action (absent here).
-            # Cast all floating-point inputs to match model dtype. With
-            # precision=bf16 the model weights are bf16 but env returns state
-            # in fp32 — without this cast state_proj's F.linear crashes with
-            # "mat1 and mat2 must have the same dtype".
-            model_dtype = next(self.parameters()).dtype
-            for k, v in batch.items():
-                if torch.is_tensor(v) and v.is_floating_point() and v.dtype != model_dtype:
-                    batch[k] = v.to(model_dtype)
+            # No silent dtype cast: under the get_model-cast regime a
+            # mismatched float input means precision is misconfigured — fail
+            # naming the knob instead of letting F.linear raise a bare
+            # mat1/mat2 error.
+            if self.expected_input_dtype is not None:
+                for k, v in batch.items():
+                    if (
+                        torch.is_tensor(v)
+                        and v.is_floating_point()
+                        and v.dtype != self.expected_input_dtype
+                    ):
+                        raise TypeError(
+                            f"prepare_observations: batch[{k!r}] is {v.dtype} but "
+                            f"the model was built for {self.expected_input_dtype} "
+                            f"(actor.model.precision; use the literal \"fp32\"). "
+                            f"The adapter no longer silently casts."
+                        )
             return batch
 
         # ---- fallback: manual tokenization, no normalization. Same as before.
@@ -389,16 +410,6 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
             idx = torch.tensor(idx, device=device).expand(bsize)
         noise_level = torch.tensor(self.noise_level, device=device)
 
-        # Force x_t to match action_in_proj's weight dtype before it goes
-        # into lerobot's denoise_step → embed_suffix → action_in_proj. The
-        # outer sample_actions sets x_dtype from action_in_proj at creation
-        # time, but the rollout worker's path occasionally produces fp32 x_t
-        # even when the policy is cast to bf16; this final cast is the
-        # belt-and-suspenders fix for the F.linear mat1/mat2 dtype check.
-        w_dtype = self.inner.action_in_proj.weight.dtype
-        if x_t.dtype != w_dtype:
-            x_t = x_t.to(dtype=w_dtype)
-
         # Grid: [1, (N-1)/N, ..., 1/N, 0] — length N+1.
         timesteps = torch.linspace(1.0, 1.0 / denoise_steps, denoise_steps, device=device)
         timesteps = torch.cat([timesteps, torch.tensor([0.0], device=device)])
@@ -419,7 +430,7 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
                 suffix_for_value = torch.mean(suffix_out, dim=1, keepdim=False)
             if self.detach_critic_input:
                 suffix_for_value = suffix_for_value.detach()
-            value_t = self.value_head(suffix_for_value.to(self.value_head.weight.dtype))[:, 0]
+            value_t = self.value_head(suffix_for_value)[:, 0]
         else:
             value_t = torch.zeros((bsize,), device=device)
 
@@ -450,7 +461,7 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
             elif self.noise_method == "flow_noise":
                 x0_weight = 1.0 - (t_b - delta_b)
                 x1_weight = t_b - delta_b
-                x_t_std = self.noise_head(suffix_out.to(self.noise_head.weight.dtype))
+                x_t_std = self.noise_head(suffix_out)
             else:
                 raise ValueError(f"Invalid noise_method: {self.noise_method}")
         else:
@@ -553,8 +564,9 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
 
             bsize = prefix_pad_masks.shape[0]
             device = prefix_pad_masks.device
-            # action_in_proj is float32 (set at policy init, independent of VLM dtype);
-            # match sample_noise's hard-coded float32 to avoid a dtype mismatch.
+            # Allocate the initial noise in the action expert's parameter dtype
+            # (fp32 under precision: "fp32"), matching lerobot sample_noise's
+            # hard-coded torch.float32. This is the noise dtype source, not a recast.
             x_dtype = self.inner.action_in_proj.weight.dtype
             N = self.num_steps
             chunk = self.inner.config.chunk_size
@@ -601,15 +613,14 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
 
             actions = x_t
             chains_t = torch.stack(chains, dim=1)  # [B, N+1, chunk, max_a]
+            # GR00T-parity storage: slice padding dims here, keep the step
+            # axis — [B, N(+1 if joint), chunk, a_env]. Step selection happens
+            # once in default_forward for BOTH PPO-ratio legs. Full-raw
+            # [.., max_a] storage would break the framework's
+            # versions=full_like(prev_logprobs) → reshape-by-action_dim chain.
             log_probs_t = torch.stack(log_probs, dim=1)[
                 :, :, : self.num_action_chunks, : self.action_env_dim
             ]
-            if self.joint_logprob:
-                log_probs_t = log_probs_t.mean(dim=1)
-            else:
-                log_probs_t = log_probs_t[
-                    torch.arange(log_probs_t.shape[0]), denoise_inds[:, 0]
-                ]
             values_t = torch.stack(values, dim=1).mean(dim=-1, keepdim=True)
 
             return {
@@ -691,6 +702,12 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         return actions_out, result
 
     # ============================== BasePolicy training dispatch ==============================
+    def reconstruct_batch(self, data: dict) -> dict:
+        """Strip rollout-bookkeeping tensors from a forward_inputs blob,
+        leaving the prepared-obs batch. Single source of truth for the
+        forward_inputs layout — used by default_forward and the smoke gates."""
+        return {k: v for k, v in data.items() if k not in self.ROLLOUT_BOOKKEEPING_KEYS}
+
     def default_forward(self, data: dict, **kwargs) -> dict[str, Tensor]:
         """Training forward: recompute (logprobs, values, entropy) for stored chains.
 
@@ -707,21 +724,50 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         compute_values = bool(kwargs.get("compute_values", False))
         chains = data["chains"]
         denoise_inds = data["denoise_inds"]
-        # Reconstruct the prepared-obs batch by taking every key that wasn't
-        # one of the rollout-bookkeeping tensors.
-        batch = {k: v for k, v in data.items() if k not in ("chains", "denoise_inds")}
+        batch = self.reconstruct_batch(data)
 
         log_probs, values, entropy = self.get_log_prob_value(
             batch, chains, denoise_inds, compute_values=compute_values,
         )
 
-        # Slice padding → env dims; collapse step axis where appropriate.
+        # Post-process BOTH PPO-ratio legs here, mirroring GR00T's
+        # default_forward: the fresh rescore (numerator) and the
+        # rollout-stored prev_logprobs (denominator, passed through by the
+        # actor worker's PREV_LOGPROB_PASSTHROUGH_MODELS branch) get the same
+        # padding slice and the same step selection/aggregation, so the two
+        # legs of exp(logprobs - old_logprobs) can never diverge structurally.
+        # One shared slice for every tensor in the logprob family; idempotent
+        # on prev_logprobs, which sample_actions already stores dim-sliced.
         log_probs = log_probs[:, :, : self.num_action_chunks, : self.action_env_dim]
         entropy = entropy[:, :, : self.num_action_chunks, : self.action_env_dim]
-        log_probs = log_probs.mean(dim=1)                             # [B, chunk, a_env]
+        prev_logprobs = kwargs.get("prev_logprobs", None)
+        if prev_logprobs is not None:
+            prev_logprobs = prev_logprobs[
+                :, :, : self.num_action_chunks, : self.action_env_dim
+            ]
+        if self.joint_logprob:
+            log_probs = log_probs.mean(dim=1)                          # [B, chunk, a_env]
+            if prev_logprobs is not None:
+                prev_logprobs = prev_logprobs.mean(dim=1)
+        else:
+            # get_log_prob_value scored exactly one step (axis 1 has size 1);
+            # the stored tensor has all N steps — pick the scored one.
+            # Eval-mode rollouts carry denoise_inds=-1 but never reach here:
+            # predict's eval branch emits no forward_inputs. No runtime check —
+            # a tensor .all() would force a GPU sync every micro-batch.
+            bsize = log_probs.shape[0]
+            log_probs = log_probs[:, 0]                                # [B, chunk, a_env]
+            if prev_logprobs is not None:
+                prev_logprobs = prev_logprobs[
+                    torch.arange(bsize, device=prev_logprobs.device),
+                    denoise_inds[:, 0],
+                ]
         entropy = entropy.mean(dim=[1, 2, 3], keepdim=False)[:, None]  # [B, 1]
         values = values.mean(dim=-1, keepdim=False)                    # [B]
-        return {"logprobs": log_probs, "values": values, "entropy": entropy}
+        out = {"logprobs": log_probs.float(), "values": values, "entropy": entropy}
+        if prev_logprobs is not None:
+            out["prev_logprobs"] = prev_logprobs.float()
+        return out
 
     def forward(self, *args, forward_type=ForwardType.DEFAULT, **kwargs):
         """Dispatch on forward_type.

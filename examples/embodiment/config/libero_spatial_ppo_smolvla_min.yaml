@@ -94,7 +94,7 @@ env:
     total_num_envs: 16            # MIN-CONFIG: 2 (was 4)
     max_episode_steps: 200       # MIN-CONFIG: 50 — must >= num_action_chunks so
                                   # one chunk_step fits inside an episode
-    max_steps_per_rollout_epoch: 200# MIN-CONFIG: 50 — n_chunk_steps =
+    max_steps_per_rollout_epoch: 200 # MIN-CONFIG: 50 — n_chunk_steps =
                                      # max_steps_per_rollout_epoch //
                                      # num_action_chunks, must be >= 1
   eval:
@@ -132,11 +132,12 @@ actor:
 
   model:
     model_path: "HuggingFaceVLA/smolvla_libero"
-    precision: "bf16"             # MIN-CONFIG: bf16 to give FSDP a uniform
-                                  # dtype (default null lets the VLM stay
-                                  # bf16 while action_in_proj/value_head
-                                  # remain fp32 — FSDP wrap crashes on the
-                                  # dtype mismatch).
+    precision: "fp32"             # MIN-CONFIG: pure fp32 — lerobot hard-codes
+                                  # fp32 in the denoise chain, so fp32 everywhere
+                                  # needs no dtype band-aids (~1.5-2x slower than
+                                  # bf16; mixed precision is a later optimization).
+                                  # MUST be the literal "fp32", not "float32" —
+                                  # see torch_dtype_from_precision in rlinf/config.py.
     num_action_chunks: 50         # MIN-CONFIG: 50 — must match SmolVLA's
                                   # baked chunk_size (lerobot config) so
                                   # bootstrap_step's zeros(B, num_action_chunks)

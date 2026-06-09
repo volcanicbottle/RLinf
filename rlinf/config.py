@@ -127,6 +127,21 @@ EMBODIED_MODEL = set(
     }
 )
 
+# Models whose rollout stores prev_logprobs with a denoise-step axis
+# [B, N, chunk, a_env] and post-process BOTH PPO-ratio legs inside
+# default_forward: actor workers must pass prev_logprobs through the model
+# forward and read back output["prev_logprobs"] as old_logprobs. Adding a
+# model here without implementing both halves feeds the loss a step-axis
+# tensor as old_logprobs (shape mismatch or silently wrong ratio).
+# NOTE: the async proximal path (AsyncPPOEmbodiedFSDPActor.
+# compute_proximal_logprobs) views the recomputed logprobs into
+# prev_logprobs.shape[2:] and cannot yet handle the step axis — keep
+# rollout.recompute_logprobs False for these models.
+PREV_LOGPROB_PASSTHROUGH_MODELS = (
+    SupportedModel.GR00T,
+    SupportedModel.SMOLVLA,
+)
+
 
 SUPPORTED_ROLLOUT_BACKENDS = ["sglang", "vllm"]
 SUPPORTED_TASK_TYPE = [
@@ -144,6 +159,10 @@ __all__ = ["build_config"]
 def torch_dtype_from_precision(
     precision: Union[int, str, None],
 ) -> Optional[torch.dtype]:
+    # NOTE: "fp32"/"32"/32/"32-true" are the only fp32 spellings — "float32"
+    # is rejected here, and validate_fsdp_cfg's all_fp32 check string-compares
+    # the literal "fp32"; any other spelling there silently re-enables FSDP
+    # mixed precision. Configs must use the literal "fp32".
     if precision in ["bf16", "bf16-mixed"]:
         return torch.bfloat16
     elif precision in [16, "16", "fp16", "16-mixed"]:

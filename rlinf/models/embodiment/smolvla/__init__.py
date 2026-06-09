@@ -39,12 +39,12 @@ def get_model(cfg: DictConfig, torch_dtype=None):
     lerobot_policy = SmolVLAPolicy.from_pretrained(ckpt_path)
     if torch_dtype is not None:
         # Cast the whole policy (VLM + action expert + action_in_proj +
-        # action_out_proj) so FSDP sees uniform dtype across all params it
-        # wraps. lerobot ships the VLM in bf16 by default but action_in_proj
-        # / action_out_proj are fp32 — without this cast FSDP wrap_model
-        # crashes with "Must flatten tensors with uniform dtype". Choose
-        # precision in YAML (precision: "bf16" for memory, "float32" for
-        # accuracy).
+        # action_out_proj) to one dtype so FSDP sees uniform params when it
+        # wraps. lerobot ships the VLM in bf16 by default while action_in_proj
+        # / action_out_proj are fp32 — without this cast FSDP wrap_model crashes
+        # with "Must flatten tensors with uniform dtype". Under precision:
+        # "fp32" (the required literal — torch_dtype_from_precision rejects
+        # "float32") this upgrades the bf16 VLM to fp32, the configured regime.
         lerobot_policy = lerobot_policy.to(dtype=torch_dtype)
 
     # Sub-block carries SmolVLA-specific PIRL knobs (mirrors cfg.openpi). Use
@@ -85,11 +85,15 @@ def get_model(cfg: DictConfig, torch_dtype=None):
     model = SmolVLAForRLActionPrediction(lerobot_policy, rl_cfg=rl_cfg, ckpt_path=ckpt_path)
 
     # Second cast pass: value_head / noise_head are created inside the wrapper
-    # __init__ as fresh fp32 Linear layers AFTER the lerobot policy cast above.
-    # Without this second pass, FSDP wrap sees the wrapper's heads in fp32 and
-    # the casted lerobot inner in bf16 → mixed-dtype FlatParam crash.
+    # __init__ as fresh Linear layers AFTER the lerobot policy cast above, so
+    # they must be brought to the same dtype. Without this pass FSDP wrap could
+    # see the wrapper's heads and the casted lerobot inner at different dtypes →
+    # mixed-dtype FlatParam crash. Under precision: "fp32" this is fp32.
     if torch_dtype is not None:
         model = model.to(dtype=torch_dtype)
+        # Arm the adapter's input-dtype tripwire: prepare_observations rejects
+        # float inputs that don't match the dtype this builder just applied.
+        model.expected_input_dtype = torch_dtype
 
     # Mirrors openpi:66-67 — when train_expert_only, freeze VLM so only the
     # action expert + value/noise heads receive gradients.
