@@ -15,18 +15,22 @@ defaults:
 #                                   filtering keeps the batch informative.
 #   2. clip_ratio_high: 0.28      — DAPO-style clip-higher (both references).
 #   3. kl_beta: 0.0               — both references run KL-free.
-#   4. global_batch_size: 128     — 8-16 samples/update is noise; references use
-#                                   512-16384. 128 = the max this env layout
-#                                   yields per rollout epoch (see math below).
+#   4. global_batch_size: 320     — 8-16 samples/update is noise; references use
+#                                   512-16384. 320 = this env layout's full
+#                                   rollout epoch (see math below).
+#   6. num_action_chunks: 10      — receding horizon: execute 10 of the 50
+#                                   predicted actions, then re-plan. Open-loop
+#                                   50 is the prime suspect for the 0.2-vs-0.79
+#                                   eval gap, and 10 gives 5x decision points.
 #   5. logprob_type: action_level — chunk_level sums 50x7=350 logp elements into
 #                                   one ratio exponent (official openpi chunk_level
 #                                   sums only 5x7=35 — not comparable). action_level
 #                                   (7-element sums) matches the reference scale.
 # Sample-count math (sync runner, all asserts must divide):
 #   samples/update = total_num_envs * (max_steps_per_rollout_epoch // num_action_chunks)
-#                  = 32 * (200 // 50) = 128  → global_batch_size 128, micro 1
-#   (= 128 grad-accumulation steps; costs time, not memory).
-#   If 32 envs OOM/CPU-thrash: drop to 16 envs + global_batch_size 64.
+#                  = 16 * (200 // 10) = 320  → global_batch_size 320, micro 1
+#   (= 320 grad-accumulation steps; costs time, not memory).
+#   16 envs (not 32): the 120G container RAM cap OOM-killed 32 envs.
 hydra:
   run:
     dir: .
@@ -58,7 +62,7 @@ algorithm:
   normalize_advantages: True
   kl_penalty: kl
   group_size: 8                   # RECIPE: 8 (was 16) — both references use 8;
-                                  # 32 envs / 8 = 4 GRPO groups per rollout.
+                                  # 16 envs / 8 = 2 GRPO groups per rollout.
   reward_coef: 1.0
   rollout_epoch: 1
   eval_rollout_epoch: 1
@@ -103,15 +107,15 @@ env:
   group_name: "EnvGroup"
 
   train:
-    total_num_envs: 32            # RECIPE: 32 (was 16) — samples/update scales
-                                  # linearly with envs; fallback 16 if OOM.
+    total_num_envs: 16            # RECIPE: 16 — 32 envs exceeded the 120G
+                                  # container RAM cap (Ray OOM-killed the actor).
     group_size: ${algorithm.group_size}  # RECIPE: same-task env groups so GRPO
                                          # relative advantage is meaningful
                                          # (mirrors libero_spatial_grpo_openvlaoft).
     max_episode_steps: 200
     max_steps_per_rollout_epoch: 200
   eval:
-    total_num_envs: 10
+    total_num_envs: 40
     max_episode_steps: 200
     auto_reset: True
     ignore_terminations: True
@@ -129,7 +133,7 @@ rollout:
   recompute_logprobs: False      # Async-only knob (sync runner ignores it); keep
                                  # False — see PREV_LOGPROB_PASSTHROUGH_MODELS in
                                  # rlinf/config.py for why async would crash.
-  enable_offload: True
+  enable_offload: False
   pipeline_stage_num: 1
 
   model:
@@ -140,12 +144,12 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
   micro_batch_size: 1
-  global_batch_size: 128          # RECIPE: = 32 envs * 4 chunk-steps, one
-                                  # optimizer step per rollout epoch via 128
+  global_batch_size: 320          # RECIPE: = 16 envs * 20 chunk-steps (200//10),
+                                  # one optimizer step per rollout epoch via 320
                                   # grad-accumulation micro-steps. Must divide
                                   # samples/update exactly (sync worker assert).
   seed: 42
-  enable_offload: True
+  enable_offload: False
 
   model:
     model_path: "HuggingFaceVLA/smolvla_libero"
@@ -154,7 +158,15 @@ actor:
                                   # dtype band-aids. MUST be the literal "fp32",
                                   # not "float32" — see torch_dtype_from_precision
                                   # in rlinf/config.py.
-    num_action_chunks: 50         # Must match SmolVLA's baked chunk_size.
+    num_action_chunks: 10         # RECIPE: receding horizon — model predicts
+                                  # chunk_size=50 (baked) but only the first 10
+                                  # actions are EXECUTED before re-planning.
+                                  # Open-loop 50 wrecks success (references
+                                  # execute 1-8; roboeval scored this ckpt 79/100
+                                  # at n_action_steps=1). Also 5x decision
+                                  # points: 200//10=20 per episode. The adapter
+                                  # slices actions AND logp to this value, so
+                                  # only executed actions are scored.
     add_value_head: False
     num_steps: 4                  # denoise steps
     smolvla:

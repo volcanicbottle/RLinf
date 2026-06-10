@@ -661,7 +661,8 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
             actions, chains, timesteps = self.sample_actions_with_chains(
                 batch, num_steps=self.num_steps
             )
-            actions_full = actions[:, :, : self.action_env_dim]
+            # Same receding-horizon truncation as the train branch below.
+            actions_full = actions[:, : self.num_action_chunks, : self.action_env_dim]
             actions_out = self.postprocessor(actions_full) if self.postprocessor is not None else actions_full
             return actions_out, {
                 "chains": chains,
@@ -673,7 +674,13 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
 
         # mode == "train": full PIRL rollout with chains/logprobs/values.
         out = self.sample_actions(batch, mode="train", compute_values=compute_values)
-        actions_full = out["actions"][:, :, : self.action_env_dim]
+        # Execute only the first num_action_chunks of the predicted 50-step
+        # chunk (receding-horizon): the model always predicts chunk_size=50
+        # (baked), but executing the full 50 open-loop wrecks success —
+        # reference protocols execute 1-8 (RLinf openpi: 5, SimpleVLA-OFT: 8,
+        # roboeval 79/100: 1). Logp/loss already slice to num_action_chunks,
+        # so only executed actions are scored — semantics stay consistent.
+        actions_full = out["actions"][:, : self.num_action_chunks, : self.action_env_dim]
         actions_out = self.postprocessor(actions_full) if self.postprocessor is not None else actions_full
 
         # forward_inputs is what the actor worker passes back into self.forward()
